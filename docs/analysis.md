@@ -1,5 +1,9 @@
 # 问题分析：overview 过渡的非线性（gnome-shell#2968）
 
+> 本文记录旧的 `engine: transform` 方案及历史测试。默认实现现已改为直接分配
+> 原生过渡布局，见 [native-layout.md](native-layout.md)。本文的 0.01 px 数据
+> 不适用于新实现；新实现会受到 Clutter 内容分配的像素取整影响。
+
 本文记录这个扩展要解决什么、为什么上游现在还没解决、以及本扩展用什么办法
 把它绕过去，附实测数据与踩过的坑。上游可移植的方案见 [upstream.md](upstream.md)。
 
@@ -15,7 +19,8 @@
   skeller 判定「没有解决根本问题」，后者自己也承认解决不了全部非线性。
 - 本扩展的做法：**不复刻公式**，而是采样两个稳态（会话态 = 窗口真实 frame
   rect；picker 稳态 = shell 自己算出来的结果），把每个 preview 钉在二者的线性
-  插值上。实测残差 **0.01 px**，且 `t=0/1` 两端与 stock 完全一致（无副作用）。
+  插值上。修复后的路径与端点误差均在 **0.01 px** 内。picker 稳态沿用 shell
+  布局；关闭时在可见的 `t=0` 仍保持修正，直到真实窗口接管。
 
 ## 2. 机理
 
@@ -78,36 +83,42 @@ screenBox(t) = lerp(sessionBox, pickerBox, t)
 
 - `sessionBox`：窗口真实 frame rect。`WindowPreview.boundingBox` 来自
   `ShellWindowPreviewLayout`，由 `meta_window_get_frame_rect()` 并集而成，
-  是 **stage 坐标**，也恰好是 shell 在 `t == 0` 时算出的几何。
+  是 **stage 坐标**。冻结槽位产生的 `t == 0` 分配可能比这个真实 frame 大，
+  不能直接把 shell 的关闭末帧当成正确目标。
 - `pickerBox`：**测量**出来的。在 `t == 1`、overview 可见且布局未冻结时，
-  shell 自己分配出来的几何就是目标，直接记住它。
+  记住 shell 自己分配出来的普通槽位。关闭前另存当前显示的窗口内容盒，
+  包含悬停放大；即使刚移除窗口导致布局冻结，也能从这个实际显示盒退出。
 
-因为两端都取自 shell 自己的输出，扩展在 `t = 0` 与 `t = 1` 是恒等变换：
-稳态几何、picker 布局、命中测试、焦点链、app grid 都不受影响。这也是
-「可以随时 enable/disable」的原因。
+picker 稳态不施加修正。关闭修正必须贯穿可见的 `t = 0`，在 `hidden` 信号
+到达后才恢复原始变换，否则动画结束时会露出过大的冻结分配并发生跳变。
+退出作用范围、拖拽与禁用扩展时也恢复完整的 pivot、scale 和 translation。
 
 ### 3.2 修正方式
 
 不走 `child.allocate()`（会和布局管理器打架），而是在原始分配**之后**给
-preview 加一个纯变换：
+preview 加一个纯变换。先保存并中和外层变换，再测量内部 `window_container`
+的局部内容盒 `base`，这样悬停缩放产生的尺寸和原点变化也被纳入：
 
 ```js
 preview.set_pivot_point(0, 0);
-preview.set_scale(local.width / allocation.get_width(), local.height / allocation.get_height());
-preview.translation_x = local.x - allocation.x1;
-preview.translation_y = local.y - allocation.y1;
+const sx = local.width / base.width;
+const sy = local.height / base.height;
+preview.set_scale(sx, sy);
+preview.translation_x = local.x - allocation.x1 - (base.x - allocation.x1) * sx;
+preview.translation_y = local.y - allocation.y1 - (base.y - allocation.y1) * sy;
 ```
 
 pivot 放左上角是关键：Clutter 的 `:translation-*` 作用在**父坐标系**且不参与
-自身缩放（顺序见 `clutter_actor_real_apply_transform()`），所以
-`translation = 目标局部原点 - 当前分配原点`，不需要再做缩放换算。
+自身缩放（顺序见 `clutter_actor_real_apply_transform()`）。局部目标通过容器
+自身和祖先的完整变换求逆得到，平移量再扣除缩放后的内部内容偏移。
 
 ### 3.3 为什么不用复刻公式
 
 另一种做法是把 `vfunc_allocate` 的数学抄进扩展做「预补偿」。数学上可解，但
 `Math.max` 分支、`slotsScale`、`WINDOW_PREVIEW_MAXIMUM_SCALE` 封顶都要逐字
 复刻，上游一改就静默坏掉。端点采样法的正确性来自「测得的就是 shell 的结果」，
-与公式无关，因此对上游改动（比如 !4035 真的落地）免疫。
+与具体插值公式无关，减少了对上游数学实现的依赖。但生命周期、私有 API 和
+actor 层级仍可能改变；每个新 Shell 版本都需要回归验证。
 
 ## 4. 实测
 
@@ -121,7 +132,7 @@ ENABLED=0 EXPECT=nonlinear tests/run-tests.sh   # 对照组，期望非线性
 判据：把每个单调段（开出/关出各自成段）的 `x, y, width, height` 对 `t` 做最小
 二乘直线拟合，取最大残差。对 `t` 拟合而非对时间拟合，因此 easing 被消掉。
 
-固定版本（嵌套 GNOME Shell 50.4，1280×800，主机 GNOME 50.5）：
+历史数据（嵌套 GNOME Shell 50.4，1280×800，主机 GNOME 50.5）：
 
 | 用例 | 段 | 残差（本扩展） | 残差（stock） | 长宽比漂移 |
 |---|---|---|---|---|
@@ -133,11 +144,27 @@ ENABLED=0 EXPECT=nonlinear tests/run-tests.sh   # 对照组，期望非线性
 （数值区间来自多次运行；单次运行的完整逐段数据见 `KEEP=1` 保留的
 `shell.log`。）
 
-对照组（`enabled: false`）故意失败，并断言「测量确实能发现 stock 的非线性」：
+对照组（`enabled: false`）断言「测量确实能发现 stock 的非线性」：
 单窗口 ≈18.6 px、双窗口 ≈19.5 px（多次运行在 18–20 px 之间），远高于 3 px 阈值。这就是「用旧代码验证测试会失败」
 这条约定的形式化版本。
 
 `0.01 px` 量级只是浮点/取整噪声——修正后的几何是 `t` 的精确线性函数。
+
+历史测试只拟合中间路径，没有验证路径终点。错误的目标也能生成完美直线，
+所以以上数值不能证明关闭交接正确。修复后的测试同时检查每段路径外推到
+`t=0/1` 的端点与真实 frame、picker 盒一致；单元测试还直接验证可见的 `t=0`
+与接近零的帧之间没有跳变。
+
+2026-10-11 的 GNOME Shell 50.5 headless 回归（1280×800，软件渲染）全部通过：
+
+| 场景 | 修正路径最大残差 | 外推端点最大误差 |
+|---|---|---|
+| 单窗口、双窗口 | 0.01 px | 0.00 px |
+| 悬停后退出 | 0.01 px | 0.00 px |
+| 关闭另一个窗口后立即悬停退出 | 0.01 px | 0.00 px |
+
+禁用对照最大残差为 22.30 px；九个单元回归全部通过，覆盖端点、坐标变换、
+工作区间的记录隔离、布局重建后的缓存保留及完整变换恢复。
 
 ## 5. 为什么可以做成扩展（并且必须走 InjectionManager）
 
@@ -169,9 +196,9 @@ class struct 的拷贝，所以我们的覆盖只影响 `WorkspaceLayout` 自己
 
 ## 6. 踩过的坑（都是导致过错误结论或错误实现的）
 
-1. **preview 不是稳定身份**：`Workspace` 在窗口换 workspace 时会销毁重建
-   preview，而 picker 几何只取决于窗口 → 端点必须按 **meta window id** 存，
-   否则每次重建都会「没有端点」，表现为开出方向完全不被修正。
+1. **preview 和 layout 都不是稳定身份**：Shell 每次隐藏概览都会重建视图。
+   端点必须按 **workspace 身份、monitor index、meta window id** 保存；
+   同一个窗口在不同布局上的槽位也不能互相覆盖。
 2. **`t == 1` 不等于「picker 几何已稳定」**：缩略图区的 `expandFraction` 是
    另一条 250 ms 时间线，容器 box 还在动；此时采样会得到一个长宽比都不对的
    中间盒（实测 492×340 vs 窗口 589×336）。修正：只在布局未冻结、overview
@@ -182,14 +209,19 @@ class struct 的拷贝，所以我们的覆盖只影响 `WorkspaceLayout` 自己
 4. **`layout_frozen` 期间不能采样**：`_doRemoveWindow()` 会冻结布局 750 ms，
    冻结期间的槽位属于旧的窗口组合；采下来会在解冻后变成过期目标（实测表现为
    关闭方向出现 17.9 % 的长宽比漂移）。
-5. **窗口在 overview 关闭期间被移动/缩放**后，旧端点是错的：比对样本里的
-   `session` box 与当前 frame rect，不一致就丢弃，宁可让这一次过渡退回 shell。
+5. **窗口在 overview 关闭期间被移动/缩放**后，旧端点是错的：比较所有窗口
+   的位置和尺寸、窗口组合、显示器、workarea、workspace count 与布局参数。
+   上下文变化就丢弃缓存，第一次开出退回 shell，关闭仍使用当前显示快照。
 6. **不要碰 shell 自己在动画的 preview**：新窗口入场有 250 ms 的
    `scale_x/y` ease（`Workspace._doAddWindow`），拖拽/DND 会写 translation，
    布局变化的 `animateAllocation` 也自带 transition。这些 preview 必须跳过。
 7. **app grid 必须排除**：picker↔app grid 时窗口本来就该随 workspace 一起缩小，
    硬掰会破坏小工作区缩略图的效果（!4010 的 `stateAdjustementValue > 0` 判断
    在这一点上是相同的）。
+8. **不能用当前 layout 的窗口集合清理全局记录**：空工作区会把其他工作区
+   的修正记录误删，却没有恢复 actor 变换，造成 picker 位置持续偏移。
+9. **外层分配不等于窗口内容几何**：悬停放大作用在内部内容 actor。只按外层
+   allocation 缩放会重复放大，尺寸和位置都错；必须修正内容盒。
 
 ## 7. 尚未覆盖 / 未验证
 
@@ -203,5 +235,5 @@ class struct 的拷贝，所以我们的覆盖只影响 `WorkspaceLayout` 自己
   （目标取自最终态），但没修它本身。
 - **HiDPI / 多显示器 / 不同工作区布局**：测试脚本支持环境变量指定容器，但尚未
   在非整数缩放、多显示器、workspaces-only-on-primary=false 组合下跑过。
-- **扩展自身的代价**：只在 allocation 发生时执行，稳定态零开销；每帧只做
-  常数级 C 属性写入。
+- **扩展自身的代价**：每次 allocation 计算布局签名并测量窗口；过渡时还需
+  做变换和属性写入。稳定态也有采样成本，尚未做大窗口数量的性能测量。

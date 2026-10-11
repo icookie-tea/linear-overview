@@ -15,6 +15,20 @@ RUNTIME="${XDG_RUNTIME_DIR:-/run/user/$(id -u)}"
 # run-tests.sh passes the expectation into the container as lo_expect.
 EXPECT="${lo_expect:-${EXPECT:-linear}}"
 
+shell_args=(--devkit)
+if [ "${LO_HEADLESS:-0}" = "1" ]; then
+    RUNTIME="$HERE/runtime"
+    mkdir -p "$RUNTIME"
+    chmod 700 "$RUNTIME"
+    export XDG_RUNTIME_DIR="$RUNTIME"
+    export LIBGL_ALWAYS_SOFTWARE=1
+    shell_args=(--headless --wayland --no-x11 --force-animations)
+    IFS=, read -ra lo_monitor_geometries <<< "${LO_MONITORS:-1280x800}"
+    for lo_monitor_geometry in "${lo_monitor_geometries[@]}"; do
+        shell_args+=(--virtual-monitor "$lo_monitor_geometry")
+    done
+fi
+
 # A Wayland socket is only usable when its compositor is still listening.
 connectable() {
     gjs -c "
@@ -45,7 +59,7 @@ echo "[harness] HOME=$HOME EXPECT=$EXPECT"
 
 before=$(ls "$RUNTIME"/wayland-* 2>/dev/null | grep -v '\.lock$' || true)
 
-lo_expect="$EXPECT" gnome-shell --devkit --unsafe-mode \
+lo_expect="$EXPECT" gnome-shell "${shell_args[@]}" --unsafe-mode \
     --automation-script "$HERE/automation.js" \
     >"$LOG" 2>&1 &
 SHELL_PID=$!

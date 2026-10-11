@@ -1,11 +1,11 @@
 // Nested-session test for linear-overview, run via --automation-script.
 //
 // Covered:
-//   E1  the correction is a no-op at both endpoints (t == 0 and t == 1)
+//   E1  correct session endpoint and handoff to the original picker layout
 //   E2  during the session <-> picker transition the on-screen geometry is a
 //       linear function of the state value t (least-squares fit residual)
 //   E3  a preview keeps its aspect ratio through the transition
-//   E4  single-window and two-window layouts both pass
+//   E4  cold single/two-window openings, hover, removal, gestures and lifecycle
 //
 // The same script is run twice by tests/run-tests.sh:
 //   lo_expect=nonlinear (correction disabled) - E2 must FAIL, i.e. the test
@@ -14,9 +14,13 @@
 import GLib from 'gi://GLib';
 import Meta from 'gi://Meta';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
+import {ExtensionState} from 'resource:///org/gnome/shell/misc/extensionUtils.js';
 
 const TAG = '[LO-TEST]';
 const EXPECT = GLib.getenv('lo_expect') ?? 'linear';
+const ENGINE = GLib.getenv('lo_engine') ?? 'native';
+const ACTIVE_STATE = ExtensionState.ACTIVE ?? ExtensionState.ENABLED;
+const INACTIVE_STATE = ExtensionState.INACTIVE ?? ExtensionState.DISABLED;
 
 const CYCLES = 4;
 const SETTLE_MS = 450; // let the workspace thumbnails' easing settle
@@ -45,14 +49,14 @@ const sleep = ms => new Promise(resolve => {
     });
 });
 
-async function waitFor(fn, timeoutMs = 20000, stepMs = 50) {
+async function waitFor(fn, timeoutMs = 20000, stepMs = 50, detail = null) {
     const deadline = GLib.get_monotonic_time() + timeoutMs * 1000;
     for (;;) {
         const value = fn();
         if (value)
             return value;
         if (GLib.get_monotonic_time() > deadline)
-            throw new Error('waitFor: timed out');
+            throw new Error(detail ? detail() : 'waitFor: timed out');
         await sleep(stepMs);
     }
 }
@@ -78,8 +82,8 @@ function findWindow(title) {
             window.get_title() === title);
 }
 
-async function placeWindow(window, rect) {
-    const monitor = Main.layoutManager.primaryMonitor;
+async function placeWindow(window, rect, monitorIndex = Main.layoutManager.primaryIndex) {
+    const monitor = Main.layoutManager.monitors[monitorIndex];
     const x = Math.round(monitor.x + monitor.width * rect.x);
     const y = Math.round(monitor.y + monitor.height * rect.y);
     const width = Math.round(monitor.width * rect.width);
@@ -90,14 +94,14 @@ async function placeWindow(window, rect) {
         const frame = window.get_frame_rect();
         return Math.abs(frame.x - x) <= 4 && Math.abs(frame.y - y) <= 4 &&
             Math.abs(frame.width - width) <= 4 && Math.abs(frame.height - height) <= 4;
-    });
+    }, 20000, 50, () => `placement requested ${x},${y} ${width}x${height}; actual ${JSON.stringify(window.get_frame_rect())}`);
 }
 
 function framesFor(window) {
     const all = global.__linearOverviewFrames ?? [];
     return all.filter(frame =>
         frame.win === window.get_id() &&
-        frame.monitor === Main.layoutManager.primaryIndex);
+        frame.monitor === window.get_monitor());
 }
 
 // Splits a chronologically ordered frame list into monotonic runs, so that
@@ -111,10 +115,14 @@ function splitRuns(frames) {
 
     for (const frame of sorted) {
         const delta = lastT === null ? 0 : frame.t - lastT;
-        const frameDirection = Math.sign(Math.round(delta * 1000));
+        const frameDirection = frame.direction
+            ? (frame.direction === 'close' ? -1 : 1)
+            : Math.sign(Math.round(delta * 1000));
 
-        if (run.length > 0 && frameDirection !== 0 && direction !== 0 &&
-            frameDirection !== direction) {
+        const timelineChanged = run.length > 0 && frame.direction && run[run.length - 1].direction &&
+            frame.direction !== run[run.length - 1].direction;
+        if (timelineChanged || (run.length > 0 && frameDirection !== 0 && direction !== 0 &&
+            frameDirection !== direction)) {
             runs.push(run);
             run = [];
         }
@@ -135,7 +143,7 @@ function splitRuns(frames) {
 // Maximum distance of the samples from their own least-squares line in t.
 // A quadratic path shows up as a systematic bow, a linear one only as
 // rounding noise.
-function fitResidual(frames, key, component) {
+function fitResidual(frames, key, component, evaluateAt = null) {
     const n = frames.length;
     let sumT = 0;
     let sumV = 0;
@@ -157,6 +165,9 @@ function fitResidual(frames, key, component) {
 
     const slope = (n * sumTV - sumT * sumV) / denominator;
     const intercept = (sumV - slope * sumT) / n;
+
+    if (evaluateAt !== null)
+        return intercept + slope * evaluateAt;
 
     let residual = 0;
     for (const frame of frames) {
@@ -187,20 +198,23 @@ function aspectDrift(frames) {
     return max / min - 1;
 }
 
-function analyse(caseName, window) {
+function analyse(caseName, window, requirePicker = true) {
     const frames = framesFor(window).filter(frame => frame.phase === 'transition');
 
-    // E1: the two settled states must be left alone.
+    // Picker steady state stays untouched. A visible closing preview at zero
+    // must match the real frame, even when the shell's frozen allocation does not.
     const all = framesFor(window);
-    const settled = all.filter(frame => frame.phase === 'picker' || frame.phase === 'session');
+    const settled = all.filter(frame => frame.phase === 'picker');
     const touched = settled.filter(frame =>
         frame.applied ||
         Math.abs(frame.shown.x - frame.raw.x) > 0.01 ||
         Math.abs(frame.shown.width - frame.raw.width) > 0.01);
 
-    check(`${caseName}: endpoints untouched (${settled.length} settled frames)`,
-        settled.length > 0 && touched.length === 0,
-        touched.length > 0 ? `${touched.length} frames with an applied correction` : '');
+    if (requirePicker || settled.length > 0) {
+        check(`${caseName}: picker unchanged (${settled.length} settled frames)`,
+            settled.length > 0 && touched.length === 0,
+            touched.length > 0 ? `${touched.length} frames with an applied correction` : '');
+    }
 
     if (frames.length === 0) {
         check(`${caseName}: transition frames recorded`, false, 'no frames');
@@ -231,9 +245,9 @@ function analyse(caseName, window) {
         const rawResidual = runResidual(run, 'raw');
         const aspect = aspectDrift(run);
         worst = Math.max(worst, residual);
-        const direction = run[run.length - 1].t > run[0].t ? 'open' : 'close';
+        const direction = run[0].direction ?? (run[run.length - 1].t > run[0].t ? 'open' : 'close');
         const detail = `${direction} run ${index} frames=${run.length} span=${span.toFixed(2)} ` +
-            `residual=${residual.toFixed(2)}px (shell alone: ${rawResidual.toFixed(2)}px) ` +
+            `residual=${residual.toFixed(2)}px${ENGINE === 'transform' ? ` (shell alone: ${rawResidual.toFixed(2)}px)` : ''} ` +
             `aspect drift=${(aspect * 100).toFixed(2)}%`;
         info(`${caseName}: ${detail}`);
 
@@ -246,6 +260,27 @@ function analyse(caseName, window) {
                 residual <= MAX_RESIDUAL_PX, detail);
             check(`${caseName}: ${direction} run ${index} keeps its aspect ratio`,
                 aspect <= MAX_ASPECT_DRIFT, detail);
+            const endpoints = {session: 0, picker: 1};
+            for (const [key, t] of Object.entries(endpoints)) {
+                const target = run.find(frame => frame[key])?.[key];
+                let error = 0;
+                if (target) {
+                    for (const component of ['x', 'y', 'width', 'height'])
+                        error = Math.max(error, Math.abs(fitResidual(run, 'shown', component, t) - target[component]));
+                }
+                check(`${caseName}: ${direction} run ${index} reaches ${key}`,
+                    Boolean(target) && error <= MAX_RESIDUAL_PX, `endpoint error=${error.toFixed(2)}px`);
+            }
+            if (requirePicker && direction === 'open' && ENGINE === 'native') {
+                const steady = all.find(frame => frame.phase === 'picker' && frame.ms >= run[run.length - 1].ms);
+                const target = run[0].picker;
+                const error = steady && target ? Math.max(...['x', 'y', 'width', 'height'].map(component =>
+                    Math.abs(steady.slot[component] - target[component]))) : Infinity;
+                check(`${caseName}: predicted picker matches shell steady layout`, error <= MAX_RESIDUAL_PX,
+                    `handoff error=${error.toFixed(2)}px; predicted=${JSON.stringify(target)}; actual=${JSON.stringify(steady?.slot)}`);
+                if (index === 0)
+                    info(`${caseName}: container predicted=${JSON.stringify(steady?.projectedContainer)} actual=${JSON.stringify(steady?.container)}`);
+            }
         }
     }
 
@@ -257,13 +292,78 @@ function analyse(caseName, window) {
     }
 }
 
-async function openCloseCycle() {
+async function openCloseCycle(hoverWindow = null) {
     Main.overview.show();
     await waitOverviewAt(1);
     await sleep(SETTLE_MS);
+    if (hoverWindow)
+        hoverWindow._delegate.showOverlay(false);
     Main.overview.hide();
     await waitOverviewAt(0);
     await sleep(SETTLE_MS);
+}
+
+function contentBox(window) {
+    const actor = window._delegate.window_container;
+    const [x, y] = actor.get_transformed_position();
+    const [width, height] = actor.get_transformed_size();
+    return {x, y, width, height};
+}
+
+async function gestureCase(window, name, start, target, progress, hover = false) {
+    if (start === 0) {
+        Main.overview.hide();
+        await waitOverviewAt(0);
+    } else {
+        Main.overview.show();
+        await waitOverviewAt(1);
+        await sleep(SETTLE_MS);
+        if (hover)
+            window._delegate.showOverlay(false);
+    }
+    const before = start === 1 ? contentBox(window) : null;
+    global.__linearOverviewFrames.length = 0;
+    const tracker = {confirmSwipe() {}};
+    Main.overview._gestureBegin(tracker);
+    for (const value of progress) {
+        Main.overview._gestureUpdate(tracker, value);
+        await sleep(25);
+    }
+    Main.overview._gestureEnd(tracker, 180, target);
+    await waitOverviewAt(target);
+    await sleep(SETTLE_MS);
+    analyse(name, window, target === 1 && start === 0);
+    if (before && target === 1) {
+        const after = contentBox(window);
+        const error = Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(before[key] - after[key])));
+        check(`${name}: cancelled gesture restores displayed picker`, error <= MAX_RESIDUAL_PX,
+            `error=${error.toFixed(2)}px; before=${JSON.stringify(before)}; after=${JSON.stringify(after)}`);
+    }
+}
+
+async function disableEnableCase(window) {
+    Main.overview.show();
+    await waitOverviewAt(1);
+    await sleep(SETTLE_MS);
+    const before = contentBox(window);
+    const uuid = 'linear-overview@icookie';
+    const extension = Main.extensionManager.lookup(uuid);
+    check('extension is enabled before lifecycle test', extension?.state === ACTIVE_STATE);
+    Main.extensionManager.disableExtension(uuid);
+    await waitFor(() => extension.state === INACTIVE_STATE);
+    await sleep(SETTLE_MS);
+    const after = contentBox(window);
+    const error = Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(before[key] - after[key])));
+    check('disable preserves picker geometry', error <= MAX_RESIDUAL_PX, `error=${error.toFixed(2)}px`);
+    check('disable releases measurement globals', global.__linearOverviewFrames === undefined && global.__linearOverviewMeasure === undefined);
+    Main.overview.hide();
+    await waitOverviewAt(0);
+    Main.extensionManager.enableExtension(uuid);
+    await waitFor(() => extension.state === ACTIVE_STATE);
+    global.__linearOverviewMeasure = true;
+    global.__linearOverviewFrames.length = 0;
+    await openCloseCycle();
+    analyse('reenabled extension cold opening', window);
 }
 
 // Nested mutter occasionally leaves the overview stuck mid-animation after
@@ -288,14 +388,15 @@ async function cycleOrSkip() {
 // The corrector falls back to the shell for a transition when it has no
 // picker endpoint yet (a window that just appeared or was resized), so run
 // probe cycles until one is fully corrected before measuring.
-async function warmUp() {
+async function warmUp(window) {
     for (let attempt = 0; attempt < 4; attempt++) {
         global.__linearOverviewFrames.length = 0;
         await cycleOrSkip();
 
-        const frames = (global.__linearOverviewFrames ?? [])
+        const frames = framesFor(window)
             .filter(frame => frame.phase === 'transition');
-        if (frames.length > 0 && frames.every(frame => frame.note === 'corrected'))
+        const directions = new Set(frames.map(frame => frame.direction));
+        if (directions.has('open') && directions.has('close') && frames.every(frame => frame.note === 'corrected'))
             return true;
         info(`warm-up ${attempt + 1}: ${JSON.stringify(
             frames.reduce((map, frame) => {
@@ -307,22 +408,28 @@ async function warmUp() {
     return false;
 }
 
-async function measure(caseName, window) {
-    const engaged = await warmUp();
-    if (EXPECT === 'linear')
-        check(`${caseName}: corrector engaged after warm-up`, engaged);
-    else
-        info(`${caseName}: corrector engaged after warm-up: ${engaged} (control run)`);
+async function measure(caseName, window, hover = false) {
+    if (ENGINE === 'transform') {
+        const engaged = await warmUp(window);
+        if (EXPECT === 'linear')
+            check(`${caseName}: corrector engaged after warm-up`, engaged);
+    }
 
     await sleep(200);
 
     global.__linearOverviewFrames.length = 0;
     for (let i = 0; i < CYCLES; i++) {
-        if (!await cycleOrSkip())
+        if (hover) {
+            await openCloseCycle(window);
+        } else if (!await cycleOrSkip())
             break;
     }
 
     analyse(caseName, window);
+    if (EXPECT === 'linear' && ENGINE === 'native') {
+        const frames = framesFor(window).filter(frame => frame.phase === 'transition');
+        check(`${caseName}: native allocation works without warm-up`, frames.length > 0 && frames.every(frame => frame.note === 'allocated'));
+    }
 }
 
 export async function run() {
@@ -337,6 +444,8 @@ export async function run() {
 
         const windowA = await waitFor(() => findWindow('LO Test Window A'));
         const windowB = await waitFor(() => findWindow('LO Test Window B'));
+        Main.overview.hide();
+        await waitOverviewAt(0);
 
         const workspaceA = windowA.get_workspace();
         const workspaceB = global.workspace_manager.append_new_workspace(false, global.get_current_time());
@@ -348,6 +457,7 @@ export async function run() {
         await placeWindow(windowA, {x: 0.18, y: 0.22, width: 0.46, height: 0.42});
         await sleep(1500);
         await measure('single window', windowA);
+        await measure('single window hovered', windowA, true);
 
         // Case 2: two windows of different sizes in the same picker layout.
         windowA.change_workspace(workspaceA);
@@ -356,6 +466,42 @@ export async function run() {
         await placeWindow(windowB, {x: 0.06, y: 0.62, width: 0.20, height: 0.22});
         await sleep(1000);
         await measure('two windows', windowA);
+
+        if (ENGINE === 'native' && EXPECT === 'linear' && Main.layoutManager.monitors.length > 1) {
+            const secondary = Main.layoutManager.monitors.find(m => m.index !== Main.layoutManager.primaryIndex);
+            windowA.move_to_monitor(secondary.index);
+            await placeWindow(windowA, {x: 0.18, y: 0.18, width: 0.46, height: 0.42}, secondary.index);
+            await sleep(1000);
+            await measure('secondary monitor cold opening', windowA);
+            windowA.move_to_monitor(Main.layoutManager.primaryIndex);
+            await placeWindow(windowA, {x: 0.18, y: 0.18, width: 0.46, height: 0.42});
+            await sleep(1000);
+        }
+
+        if (ENGINE === 'native' && EXPECT === 'linear') {
+            await gestureCase(windowA, 'gesture open', 0, 1, [0.08, 0.18, 0.28, 0.38, 0.48, 0.58, 0.68, 0.78, 0.88]);
+            await gestureCase(windowA, 'gesture open cancelled', 0, 0,
+                [0.08, 0.18, 0.28, 0.38, 0.48, 0.58, 0.68, 0.78, 0.68, 0.58, 0.48, 0.38, 0.28, 0.18, 0.08]);
+            await gestureCase(windowA, 'gesture close cancelled hovered', 1, 1,
+                [0.92, 0.82, 0.72, 0.62, 0.52, 0.42, 0.32, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82, 0.92], true);
+            await gestureCase(windowA, 'gesture close', 1, 0, [0.92, 0.82, 0.72, 0.62, 0.52, 0.42, 0.32, 0.22, 0.12]);
+        }
+
+        // Close a window and immediately leave before the delayed relayout.
+        // The surviving preview must use its displayed slot, not an old cache.
+        Main.overview.show();
+        await waitOverviewAt(1);
+        await sleep(SETTLE_MS);
+        global.__linearOverviewFrames.length = 0;
+        windowB.delete(global.get_current_time());
+        await waitFor(() => !findWindow('LO Test Window B'));
+        windowA._delegate.showOverlay(false);
+        Main.overview.hide();
+        await waitOverviewAt(0);
+        if (EXPECT === 'linear')
+            analyse('close window then hovered exit', windowA, false);
+        if (ENGINE === 'native' && EXPECT === 'linear')
+            await disableEnableCase(windowA);
     } catch (e) {
         failures.push(String(e));
         logError(e, `${TAG} test run failed`);

@@ -1,100 +1,90 @@
-# 行为测试（嵌套 GNOME Shell）
+# Linear Overview regression tests
 
-这些测试回答一个问题：**过渡期间窗口 preview 的屏幕几何是不是 `t` 的线性
-函数？** 它跨 250 ms 的动画发生，手动看录像只能得到"感觉"，所以测试在 toolbox
-容器里的一个嵌套 GNOME Shell（`gnome-shell --devkit`）中自动跑，并对每帧几何
-做最小二乘拟合。
-
-## 断言
-
-`nested/automation.js` 在 shell 启动后运行，覆盖两个用例（单窗口 / 双窗口）：
-
-| 断言 | 条件 |
-|---|---|
-| 端点不被修改 | `t == 0`（会话态）与 `t == 1`（picker 稳态）下，修正前后的几何完全一致，且没有任何帧应用了修正 |
-| 路径线性 | 每个单调段（开出/关出各自成段），`x, y, width, height` 对 `t` 的最小二乘拟合残差 ≤ 1.5 px |
-| 长宽比不变 | 段内 `width/height` 的相对漂移 ≤ 0.5 % |
-| 对照可发现 | `EXPECT=nonlinear` 时，至少一段的残差 ≥ 3 px（证明测的是真东西） |
-
-对 **`t`** 而不是时间做拟合，所以 easing（`EASE_OUT_SINE` 等）被消掉——线性
-与否只取决于几何，不取决于时间曲线。
-
-## 运行
+## Commands
 
 ```sh
-tests/run-tests.sh                              # 修正开启，期望线性
-ENABLED=0 EXPECT=nonlinear tests/run-tests.sh   # 对照组，期望非线性
-KEEP=1 tests/run-tests.sh                       # 保留日志与临时 HOME
+node tests/unit/native-layout.test.cjs
+node tests/unit/corrector.test.cjs
+CONTAINER=host KEEP=1 tests/run-tests.sh
+CONTAINER=host ENABLED=0 EXPECT=nonlinear KEEP=1 tests/run-tests.sh
+CONTAINER=host LO_ENGINE=transform KEEP=1 tests/run-tests.sh
+CONTAINER=host LO_MONITORS=1280x800,1600x900 KEEP=1 tests/run-tests.sh
 ```
 
-环境变量：
+The default backend is the `fedora-toolbox-44` toolbox container, using
+`gnome-shell --devkit`. `CONTAINER=host` uses a headless host Shell with
+software rendering and `--force-animations`. It needs GNOME Shell 50+, GJS,
+GTK4 and permission to create local sockets.
 
-| 变量 | 默认值 | 说明 |
-|---|---|---|
-| `CONTAINER` | `fedora-toolbox-44` | toolbox 容器名 |
-| `WORKDIR` | `/tmp/linear-overview-tests` | 容器可见的临时目录 |
-| `ENABLED` | `1` | 写入扩展 `dev-config.json` 的 `enabled` |
-| `EXPECT` | `linear` | `linear` / `nonlinear`，决定哪条断言才算通过 |
-| `KEEP` | `0` | `1` 保留日志与 `/tmp/linear-overview-tests/home` |
+`LO_ENGINE=native` is the default. `LO_ENGINE=transform` selects the previous
+implementation. `ENABLED=0 EXPECT=nonlinear` verifies that the measurement
+actually detects the stock path. `LO_MONITORS` is a comma-separated list of
+headless virtual-monitor dimensions; integer-scale monitors are tested.
 
-前置条件：
+## Isolation
 
-- 在一个有图形会话的终端里运行（嵌套 shell 会通过 `mutter-devkit` 在宿主机上
-  显示一个窗口）
-- 容器里要有 `gnome-shell >= 50`（`--devkit`）、`gjs`、GTK4、
-  `/usr/libexec/mutter-devkit`
+Every run uses a throwaway HOME, private XDG config/data/cache/state/runtime
+locations and a private D-Bus session. `dconf-setup.sh` checks `HOME ==
+LO_TEST_HOME` and refuses to run outside that private bus. Never run its dconf
+commands on the live desktop.
 
-## ⚠️ dconf 隔离
+`WORKDIR` defaults to `/tmp/linear-overview-tests` and is recreated for a run;
+use a dedicated scratch path. `KEEP=1` retains logs. The harness checks that a
+Wayland socket is connectable, removes only stale test sockets, and forwards
+`lo_expect`/`lo_engine` into the nested process. The host backend places all
+sockets in the dedicated test runtime.
 
-**dconf 走的是会话总线，不是 `$HOME`。** 一条
+## Native cases and assertions
 
-```bash
-dconf write /org/gnome/shell/enabled-extensions "['...']"
-```
+The native suite does **not** warm up past the first opening. It checks:
 
-写到的是**正在使用的桌面环境**的设置，而不是测试目录。因此所有 dconf 操作都像
-`nested/dconf-setup.sh` 那样：
+* Single/two-window cold opening and hovered closing.
+* Removing another window and closing before the delayed layout unfreezes.
+* Gesture opening, closing and reverse cancellation, including a hovered
+  picker restored after its Workspace actors are rebuilt.
+* A cold opening on a secondary virtual monitor when two monitors are supplied.
+* Actual extension disable/enable in an open picker and geometry/global cleanup.
 
-```bash
-env HOME="$TESTHOME" LO_TEST_HOME="$TESTHOME" \
-    dbus-run-session -- bash dconf-setup.sh
-```
+It fits x, y, width and height against state value t per monotonic segment.
+This removes time easing from the fit. The linear threshold is 1.5 px; the
+stock-control run must exceed 3 px. It also checks aspect drift, extrapolated
+session/picker endpoints, and compares opening targets with Shell's separately
+rendered steady picker slots. The slot comparison catches a straight path that
+ends at the wrong place. Container predictions are logged for diagnosing
+preferred-size or pixel-rounding mismatches.
 
-`dconf-setup.sh` 自带守卫：要求 `HOME == LO_TEST_HOME`，并且拒绝在
-`unix:path=$XDG_RUNTIME_DIR/bus`（真机会话总线）上运行。
+Native window content is allocated through Clutter and can be rounded by a
+pixel. Its residual is therefore not the 0.01 px measured by the old transform
+engine. The old engine retains warm-up because it depends on sampled endpoints.
 
-## 用旧行为验证测试会失败
+Gesture tests call the real `Overview._gestureBegin/Update/End` entry points
+with controlled progress values. They verify the Shell state/lifecycle, not
+physical touchpad event delivery.
 
-```bash
-ENABLED=0 EXPECT=nonlinear tests/run-tests.sh
-```
+## Measurement
 
-应当 **ALL PASS**（含义是"测量确实发现了 stock 的非线性"），日志里能看到
-单窗口 ≈18.6 px、双窗口 ≈19.5 px 的最差残差（多次运行在 18–20 px 之间）；而 `EXPECT=linear` 时这些用例必须
-失败。这一对组合就是"测试没有骗人"的证据。
+`measure: true` or `global.__linearOverviewMeasure = true` records frames in
+`global.__linearOverviewFrames`. Native records include:
 
-## 读日志
+* `t`, phase, direction, monitor and window identity.
+* `shown` content geometry, `slot` outer preview geometry, desired geometry
+  and the fixed session/picker endpoints.
+* `projectedContainer` and actual `container` geometry.
+* `allocated`, `busy`, steady-state or `disabled` notes.
+* Counts of computed targets and captured closing snapshots.
 
-`KEEP=1` 后看 `/tmp/linear-overview-tests/shell.log`：
+Native `raw` equals shown geometry: it does not execute a second stock
+allocation just to manufacture a comparison. Use the separate disabled run.
+Legacy records retain the raw-versus-corrected same-frame comparison.
 
-- `[LO-TEST] INFO xxx: notes {...}`：过渡帧的修正状态计数。理想值是
-  `{"corrected": N}`；出现 `no-picker` 表示该窗口没有可用的 picker 端点
-  （新窗口、刚被缩放、布局冻结），出现 `busy` 表示 shell 正在自己动画这个
-  preview。
-- 每个 run 一行残差：`residual=…px (shell alone: …px)`，第二个数字是**同一批帧
-  里原始（未修正）几何的残差**，直接给出对照。
-- 前两个 run 会打印逐帧转储
-  `[t, note, 记录号, picker 盒, session 盒, 显示盒]`，用来定位端点错误。
-- `stats` 里的 `sample` / `dropSession` / `dropAge` / `frozen` / `hidden`
-  计数说明采样与丢弃的原因。
+## Unit tests and limits
 
-## 已知的测试环境抖动
+Native unit tests execute the production modules with actor/layout doubles:
+first-opening target calculation, inverse parent transform, hovered visible
+zero, gesture reversal, snapshot transfer across view recreation, scope/gating
+and disable/destruction cleanup. Legacy unit tests exercise the old corrector.
 
-嵌套 mutter 在窗口更换 workspace 之后偶尔会把 overview 卡在动画中途
-（`t` 停在 0，`animationInProgress` 为真）。这是**测试环境问题，不是被测行为**：
-`cycleOrSkip()` 会记录并尝试恢复，然后跳过该轮的剩余循环、用已有帧继续分析。
-日志里出现 `cycle aborted:` 不代表失败。
-
-另外，崩溃过的嵌套 shell 会留下自己的 Wayland socket，下一个嵌套 shell 会
-**复用同一个名字**，于是"新 display"检测不到——`harness.sh` 因此会先清理
-没人监听（连接失败）的 socket，并且只接受能成功连接的候选。
+A wedged nested overview may be retried only when the log explicitly says
+`cycle aborted`; an assertion failure must never be retried away. Physical
+input, fractional scale, monitor hotplug, attached dialogs, large multirow
+layouts and custom themes need additional validation.

@@ -1,5 +1,9 @@
 # 把这里学到的搬回上游（草案）
 
+> 本文是早期 transform 试验的上游讨论草案。当前扩展已实现直接分配的布局
+> 分支，见 [native-layout.md](native-layout.md)。下方早期伪代码里的端点恒等
+> 判断不能作为关闭交接的正确实现，必须保证可见零端点等于真实窗口 frame。
+
 本扩展是试验台，不是修复。本文把它验证过的结论整理成**可以直接落到
 gnome-shell 仓库**的形式，供将来开 MR（建议基于
 [!4035](https://gitlab.gnome.org/GNOME/gnome-shell/-/merge_requests/4035)）
@@ -148,3 +152,14 @@ workspace。
 - !4010 的 58 条讨论（可匿名读取：
   `/-/merge_requests/4010/discussions.json`）、!4035 的 7 条讨论。
 - 本仓库的实测数据与判据：[analysis.md](analysis.md)、[../tests/README.md](../tests/README.md)。
+
+## 端点交接与生命周期修正
+
+端点恒等并不是正确的会话交接判据：关闭概览时，冻结槽位按容器宽度
+重新缩放，再经 `Math.max()` 放大，会使 `t=0` 的原始 preview 大于实际窗口。
+扩展必须保持屏幕几何修正，直到 overview 隐藏之后才恢复 actor 变换；
+Shell 侧应直接保证最后可见几何与实际窗口 frame 一致。
+
+缓存属于 layout 与窗口 id，不能让另一个工作区的 allocation 清除本工作区
+的记录。关闭起点取当前绘制的 window content，包含 hover 缩放；正常 picker
+缓存取未受修正的外层 slot。验收同时检查路径、真实端点和稳态恢复。
