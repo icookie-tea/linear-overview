@@ -1,0 +1,31 @@
+# Test artifacts -------------------------------------------------------------
+# The nested harness writes its logs next to the scripts; run-tests.sh writes
+# its work directory under /tmp (WORKDIR).
+tests/nested/*.log
+/tmp/linear-overview-tests/
+*.log
+
+# Local configuration --------------------------------------------------------
+# dev-config.json is tracked on purpose: it is the schema-less settings file.
+# Keep local personal variants out of the repository.
+dev-config.local.json
+
+# Editors / IDEs -------------------------------------------------------------
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.settings/
+
+# Build and packaging --------------------------------------------------------
+*.zip
+*.shell-extension.zip
+build/
+dist/
+node_modules/
+
+# OS noise -------------------------------------------------------------------
+.DS_Store
+Thumbs.db

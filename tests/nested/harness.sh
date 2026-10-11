@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 icookie-tea
+#
 # Runs inside the toolbox container, inside a private dbus session whose
 # HOME/LO_TEST_HOME point at the throwaway test home.  Starts a nested GNOME
 # Shell (--devkit) that executes automation.js, connects a plain GTK4 client

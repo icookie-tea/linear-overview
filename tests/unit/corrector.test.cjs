@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 icookie-tea
 // Execute the production modules with actor doubles. These tests cover
 // lifecycle and geometry contracts; the nested shell suite checks real actors.
 const fs = require('node:fs');

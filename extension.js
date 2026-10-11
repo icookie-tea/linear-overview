@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 icookie-tea
 // Linear Overview - screen-space linearisation of the session <-> window
 // picker transition (testbed for gnome-shell#2968).
 //

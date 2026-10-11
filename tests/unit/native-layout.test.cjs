@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 icookie-tea
 const fs = require('node:fs');
 const path = require('node:path');
 const vm = require('node:vm');

@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 icookie-tea
+#
 # Populate the isolated test dconf database.
 #
 # dconf talks to the *session bus*, not just to $HOME: a plain `dconf write`

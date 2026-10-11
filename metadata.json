@@ -4,5 +4,6 @@
     "description": "Allocates window previews along a screen-space path during the session <-> window picker transition. GNOME Shell 50 layout implementation for issue #2968.",
     "shell-version": ["50"],
     "session-modes": ["user"],
-    "url": "https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/2968"
+    "url": "https://github.com/icookie-tea/linear-overview",
+    "version-name": "0.1.0"
 }

@@ -7,6 +7,22 @@ apply scale or translation to the outer preview actors.
 
 [issue]: https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/2968
 
+## Authorship
+
+This extension — its implementation, its test harness and its documentation —
+was written by **ChatGPT 6.1 Sol**. The repository owner is only responsible
+for the project direction, the real-shell validation and the releases.
+
+## License
+
+Copyright (C) 2026 icookie-tea
+
+Licensed under the **GNU General Public License, version 2 or later**
+(`GPL-2.0-or-later`), matching what GNOME Shell itself is licensed under. See
+[LICENSE](LICENSE) for the full text. Every source file carries a short
+`SPDX-License-Identifier` header; there is no separate per-file copyright
+assignment.
+
 ## How the native engine works
 
 1. Reserve the final workspace-thumbnails geometry during the session/picker

@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: GPL-2.0-or-later
+// Copyright (C) 2026 icookie-tea
 // Two plain GTK4 windows used as preview subjects.
 //
 // The exact geometry does not matter: automation.js moves and resizes both

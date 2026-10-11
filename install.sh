@@ -1,5 +1,8 @@
 #!/usr/bin/env bash
 #
+# SPDX-License-Identifier: GPL-2.0-or-later
+# Copyright (C) 2026 icookie-tea
+#
 # Install / uninstall this GNOME Shell extension for the current user.
 #
 #   ./install.sh              copy the extension into the user's extensions dir
@@ -63,7 +66,7 @@ install_extension() {
         ln -s "$SCRIPT_DIR" "$TARGET_DIR"
         echo "已链接: $TARGET_DIR -> $SCRIPT_DIR"
     else
-        cp extension.js metadata.json dev-config.json "$TARGET_DIR/"
+        cp extension.js metadata.json dev-config.json LICENSE README.md "$TARGET_DIR/"
         cp -r lib "$TARGET_DIR/lib"
         echo "已安装: $TARGET_DIR"
     fi
