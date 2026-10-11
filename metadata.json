@@ -1,0 +1,8 @@
+{
+    "uuid": "linear-overview@icookie",
+    "name": "Linear Overview",
+    "description": "Makes window previews move and resize linearly in screen space during the session <-> window picker transition. A testbed for gnome-shell issue #2968.",
+    "shell-version": ["50", "51"],
+    "session-modes": ["user"],
+    "url": "https://gitlab.gnome.org/GNOME/gnome-shell/-/issues/2968"
+}

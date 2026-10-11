@@ -1,0 +1,7 @@
+{
+    "enabled": true,
+    "scope": "active-workspace",
+    "gate": "session-picker",
+    "debug": false,
+    "measure": false
+}
