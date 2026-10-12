@@ -22,6 +22,8 @@
 #   EXPECT      linear | nonlinear      (default: linear)
 #   KEEP        1 = keep logs and the scratch directory
 #   ATTEMPTS    retries when the *nested shell* wedges (default: 2)
+#   LO_PRIMARY_ONLY  true | false: workspace policy in the private session
+#                    (default: false)
 #
 # Requirements:
 #   - a running graphical session (the nested shell appears in a

@@ -21,6 +21,7 @@ class ActorBox {
     set_origin(x, y) { const [w, h] = this.get_size(); this.x1 = x; this.y1 = y; this.set_size(w, h); }
     set_size(w, h) { this.x2 = this.x1 + w; this.y2 = this.y1 + h; }
     copy() { return new ActorBox(this); }
+    equal(other) { return ['x1', 'y1', 'x2', 'y2'].every(key => this[key] === other[key]); }
 }
 function fixture() {
     const overview = Object.assign(new Signals(), {visible: true, animationInProgress: true, closing: false});
@@ -28,6 +29,7 @@ function fixture() {
     const math = Object.create(Math);
     math.clamp = (x, lower, upper) => Math.min(upper, Math.max(lower, x));
     const controls = {getWorkspacesBoxForState: () => new ActorBox({y1: 100, x2: 1280, y2: 700}),
+        layout_manager: {},
         apply_relative_transform_to_point: (_, point) => point,
         _workspacesDisplay: {get_theme_node: () => ({get_content_box: box => box.copy()})}};
     overview._overview = {controls};
@@ -88,6 +90,9 @@ function fixture() {
         _createBestLayout: () => ({}), _layoutStrategy: {computeWindowSlots: (_, area) => {
             areas.push({...area}); return [[area.width / 2 - 250, area.height / 2 - 150, 500, 300, preview]];
         }}};
+    layout._getWindowSlots = box => layout._layoutStrategy.computeWindowSlots(layout._layout,
+        {x: box.x1, y: box.y1, width: box.get_width(), height: box.get_height()});
+    layout.notify = () => {};
     layout._overviewAdjustment = {value: 0, getStateTransitionParams: () => layout.params};
     function at(t, closing = false) {
         layout._stateAdjustment.value = t;
@@ -119,6 +124,110 @@ test('cold opening calculates the final picker once and allocates content direct
     }
     assert.equal(f.areas.length, 1);
     assert.deepEqual(f.areas[0], {x: 0, y: 0, width: 1000, height: 600});
+});
+
+test('secondary picker respects primary-only policy even when thumbnails should_show is true', () => {
+    for (const primaryOnly of [true, false]) {
+        const f = fixture();
+        const hooks = new Map();
+        const original = function (state, box, padding, thumbnailsHeight, spacing) {
+            const result = box.copy();
+            if (state === 1) {
+                result.set_origin(0, padding + thumbnailsHeight + spacing);
+                result.set_size(box.get_width(), box.get_height() - 2 * padding - thumbnailsHeight - spacing);
+            }
+            return result;
+        };
+        f.engine.install({overrideMethod(_, name, create) { hooks.set(name, create(original)); }});
+        const display = {_overviewAdjustment: f.layout._overviewAdjustment,
+            _settings: {get_boolean: key => { assert.equal(key, 'workspaces-only-on-primary'); return primaryOnly; }},
+            _thumbnails: {should_show: true, visible: !primaryOnly, maxThumbnailScale: 0.12, get_preferred_height: () => [108, 108]},
+            get_theme_node: () => ({get_length: () => 12})};
+        const hook = hooks.get('_getWorkspacesBoxForState');
+        const box = new ActorBox({x2: 1600, y2: 900});
+        const height = primaryOnly ? 0 : 108;
+        const spacing = primaryOnly ? 0 : 12;
+        const actual = hook.call(display, 1, box, 90, 0, 0);
+        assert.equal(actual.y1, primaryOnly ? 90 : 210);
+        assert.equal(actual.get_height(), primaryOnly ? 720 : 600);
+        f.overview.animationInProgress = false;
+        f.layout.params = {transitioning: false, currentState: 1, initialState: 1, finalState: 1};
+        assert(actual.equal(hook.call(display, 1, box, 90, height, spacing)), 'the transition and original steady boxes must agree');
+        f.overview.animationInProgress = true;
+        f.layout.params.transitioning = true;
+        f.config.values.enabled = false;
+        assert(hook.call(display, 1, box, 90, 37, 5).equal(original(1, box, 90, 37, 5)), 'disabled allocation delegates unchanged');
+    }
+});
+
+test('workspace measurement uses allocation even when hover invalidates the preferred size', () => {
+    const f = fixture();
+    f.container.allocation.set_size(1000, 600);
+    f.container.origin = {x: 50, y: 30};
+    f.container.scale = {x: 0.9, y: 0.8};
+    f.container.get_transformed_size = () => [1280, 768];
+    f.at(0.5);
+    equalBox(f.frames.at(-1).container, {x: 50, y: 30, width: 900, height: 480});
+});
+
+test('minimized previews start at the workarea origin with slot size, not at their saved frame', () => {
+    const f = fixture();
+    f.layout._windows.get(f.preview).metaWindow.showing_on_its_workspace = () => false;
+    f.layout._workarea.x = 1280;
+    f.layout._workarea.y = 48;
+    for (const t of [0, 0.1, 0.5, 0.9, 1, 0.7, 0]) {
+        f.container.allocation.set_size(1280 - 280 * t, 768 - 168 * t);
+        f.at(t);
+        const allocationScale = f.container.allocation.get_width() / 1280;
+        // Shell's original vfunc lerps the workarea origin to a current slot
+        // and clamps the floating size to that slot before interpolation.
+        const origin = {x: 1280 * allocationScale, y: 48 * allocationScale, width: 500, height: 300};
+        const slot = {x: f.container.allocation.get_width() / 2 - 250,
+            y: f.container.allocation.get_height() / 2 - 150, width: 500, height: 300};
+        const box = f.preview.allocation;
+        equalBox({x: box.x1, y: box.y1, width: box.get_width(), height: box.get_height()}, interpolate(origin, slot, t));
+        assert.equal(f.frames.at(-1).note, 'shell-minimized');
+        assert.equal(f.frames.at(-1).session, null);
+    }
+});
+
+test('minimized closing retains frozen shell slots and unfreezes on gesture allocation changes', () => {
+    const f = fixture();
+    f.layout._windows.get(f.preview).metaWindow.showing_on_its_workspace = () => false;
+    f.layout._layoutFrozen = true;
+    f.layout._lastBox = f.container.allocation.copy();
+    f.layout._windowSlotsBox = f.container.allocation.copy();
+    f.layout._windowSlots = [[120, 80, 400, 240, f.preview]];
+    f.at(1, true);
+    equalBox(f.geometry(), {x: 120, y: 80, width: 400, height: 240});
+    f.container.allocation.set_size(1408, 844.8);
+    f.at(0, true);
+    equalBox(f.geometry(), {x: 0, y: 35.2, width: 440, height: 264});
+    assert.equal(f.layout._layoutFrozen, true);
+    f.overview.animationInProgress = false;
+    f.container.allocation.set_size(1280, 768);
+    f.at(0.4, true);
+    assert.equal(f.layout._layoutFrozen, false);
+    assert.equal(f.preview.allocation.get_width(), 500);
+});
+
+test('an all-minimized picker gesture builds slots after workspace views are recreated', () => {
+    const f = fixture();
+    f.layout._metaWorkspace.index = () => 0;
+    f.layout._windows.get(f.preview).metaWindow.showing_on_its_workspace = () => false;
+    f.at(1);
+    f.engine.capturePicker(true);
+    f.container.emit('destroy');
+    const replacement = fixture();
+    replacement.layout._metaWorkspace.index = () => 0;
+    replacement.layout._windows.get(replacement.preview).metaWindow.showing_on_its_workspace = () => false;
+    replacement.layout._stateAdjustment.value = 0.6;
+    replacement.layout._overviewAdjustment.value = 0.6;
+    replacement.layout.params = {transitioning: true, currentState: 0.6, initialState: 1, finalState: 0};
+    f.engine.allocate(replacement.layout, replacement.container, replacement.container.allocation);
+    equalBox(replacement.geometry(), {x: 234, y: 153.2, width: 500, height: 300});
+    assert(replacement.layout._layout, 'the empty closing snapshot still needs a shell layout');
+    assert.equal(f.engine._gestureSnapshots.size, 0);
 });
 
 test('closing a hovered preview reaches the real frame at visible zero', () => {

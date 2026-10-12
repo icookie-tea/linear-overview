@@ -43,6 +43,10 @@ The first opening works without a warm-up or a persistent picker cache. Moving
 or resizing windows while the overview is closed generates fresh targets on
 the next opening.
 
+Minimized/non-showing windows retain Shell's workarea-origin, current-slot size
+and fading rules. They are verified against the original Shell allocator;
+normal windows in the same layout continue using the linear path.
+
 Closing starts from the currently rendered window content, including hover
 zoom and frozen layouts after removing a window. The allocation accounts for
 Shell's centered content scale without modifying that scale animation. A

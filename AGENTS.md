@@ -27,6 +27,8 @@ allocation with outer preview transforms.
   layout strategy before the first frame; no cross-overview sampling cache.
 * Freeze target thumbnails height/fraction for the session transition. Their
   independent animation must not move the target rectangle.
+  Secondary thumbnails also depend on `workspaces-only-on-primary`, not just
+  `should_show`. Test both policies with at least three dynamic workspaces.
 * Account for WorkspacesDisplay's BinLayout rounding, Workspace's preferred
   sizes, fit-single placement, theme content box and window chrome padding.
 * Interpolate in stage space, then invert the current container transform.
@@ -40,6 +42,10 @@ allocation with outer preview transforms.
   expire when consumed, on hidden and on disable.
 * Preserve Shell-owned drag, entry and allocation animations. Native geometry
   measurement marks these previews busy instead of claiming linearity.
+* Non-showing/minimized previews retain Shell's workarea-origin, current-slot
+  size and opacity rules. Preserve frozen slots; build a layout after gesture
+  view recreation even when the closing snapshot is empty. Do not substitute
+  a zero-size saved desktop frame or claim these paths are linear.
 
 ## InjectionManager is required
 

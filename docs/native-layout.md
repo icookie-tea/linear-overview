@@ -21,6 +21,14 @@ Three ordinary hooks accompany allocation:
 * `ControlsManager.gestureBegin` captures displayed picker content before the
   original method rebuilds workspace views.
 
+Secondary thumbnail reservation respects `workspaces-only-on-primary`.
+`should_show` only reflects workspace count, so it can remain true when the
+monitor policy hides the secondary thumbnail bar. In that mode the reserved
+height and spacing must both be zero. Using `should_show` alone caused the
+secondary workspace and windows to jump when the original steady layout took
+over. The regression keeps three dynamic workspaces alive; two workspaces
+hide thumbnails and previously masked the error.
+
 InjectionManager restores all four hooks on disable. Native mode never writes
 outer preview pivot, scale or translation. Only the chosen engine is
 constructed; changing `engine` requires disabling/enabling the extension.
@@ -70,6 +78,27 @@ marked busy in measurement. They are not claimed to follow the fixed path.
 Layout changes queued during a fixed path are handed back before the first
 steady allocation, allowing Shell to animate the reshuffle from that endpoint.
 
+## Minimized previews
+
+Non-showing windows use Shell's special allocation branch. Their floating
+origin comes from the workarea, and during session transitions their floating
+size is clamped to the current slot size. Shell animates opacity with picker
+progress. The previous native implementation instead interpolated from the
+saved desktop frame with zero width/height, changing both the origin and size.
+
+The native engine now obtains current slots through Shell's `_getWindowSlots`
+and preserves its cached slots while layout is frozen. It reproduces that
+per-preview branch and leaves opacity and hover scaling to Shell. Normal
+windows in the same layout keep the fixed linear path. Minimized paths are
+marked `shell-minimized`, and are not claimed to be screen-space linear.
+An all-minimized picker can have an empty closing snapshot; after gesture view
+recreation the engine still builds the layout needed for these slots.
+
+The nested regression invokes Shell's original JavaScript allocator on shadow
+previews and compares allocations frame by frame without moving live actors.
+It covers opening, hovered closing, gesture opening/closing/cancellation,
+near-zero progress, mixed layouts and secondary-monitor coordinates.
+
 ## Verification
 
 The harness isolates HOME, all XDG locations, runtime sockets and D-Bus. It
@@ -88,7 +117,7 @@ Covered cases:
   the secondary monitor and a fresh opening there.
 * Actual disable/enable in a shown overview, geometry preservation, measurement
   teardown and a fresh native opening after re-enable.
-* Seven native unit regressions plus nine legacy transform regressions.
+* Twelve native unit regressions plus nine legacy transform regressions.
 
 Opening predictions match Shell's independently rendered steady slots in the
 single/two-window and secondary-display cases. Direct content allocation has
@@ -106,8 +135,33 @@ opening target with the independently rendered steady layout.
 | Disabled stock control | 21.99 px | — | — | Nonlinearity detected |
 | Legacy transform comparison | 0.01 px | 0.01 px | — | All pass |
 
-All 16 unit regressions pass (7 native, 9 legacy). These numbers are sampled
+The minimized follow-up on the same Shell version, with 1280×800 + 1600×900
+virtual monitors, passes all single/mixed/secondary-monitor and gesture cases.
+Each minimized case compares 111 allocations with the original Shell function,
+including 16 near the opening start. Maximum allocation error is 0.01 px;
+opacity quantization differs by at most one level. Normal-window path,
+endpoint, steady-layout handoff and extension lifecycle checks also pass.
+
+All 21 unit regressions pass (12 native, 9 legacy). The three added minimized
+unit regressions fail against the previous implementation. These numbers are sampled
 test results for the stated configurations, not a universal error bound.
+
+The secondary-policy follow-up on 2026-10-12 checks both primary-only and
+all-monitor workspaces, including cold opening, hovered exit and gesture
+cancellation. Workspace rectangles are measured from allocation plus parent
+transform: a hover-triggered relayout can make `get_transformed_size()` report
+the preferred desktop size while the current allocation is still smaller.
+The suite waits for extension startup before collecting frames.
+
+The previous primary-only implementation reproduces a 26 px window handoff
+error and an approximately 83 px workspace handoff error with three dynamic
+workspaces. The policy regression also fails against that implementation.
+With the fix, both complete dual-monitor suites pass on GNOME Shell 50.5:
+
+| Workspace policy | Predicted window/allocated container endpoint error | Maximum workspace handoff error |
+|---|---|---|
+| Primary monitor only | 0.00 px | 0.24 px |
+| All monitors | 0.00 px | 0.63 px |
 
 Physical touchpad event delivery, fractional scaling, hotplug, attached dialogs,
 large multirow sets and custom themes remain outside the verified matrix.
@@ -123,4 +177,5 @@ CONTAINER=host KEEP=1 tests/run-tests.sh
 CONTAINER=host ENABLED=0 EXPECT=nonlinear KEEP=1 tests/run-tests.sh
 CONTAINER=host LO_ENGINE=transform KEEP=1 tests/run-tests.sh
 CONTAINER=host LO_MONITORS=1280x800,1600x900 KEEP=1 tests/run-tests.sh
+CONTAINER=host LO_MONITORS=1280x800,1600x900 LO_PRIMARY_ONLY=true KEEP=1 bash tests/run-tests.sh
 ```

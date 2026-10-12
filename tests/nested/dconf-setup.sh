@@ -41,5 +41,10 @@ dconf write /org/gnome/desktop/background/picture-options "'none'"
 dconf write /org/gnome/desktop/background/primary-color "'#335577'"
 dconf write /org/gnome/desktop/background/color-shading-type "'solid'"
 
-# keep the window picker geometry stable (no workspace switcher surprises)
-dconf write /org/gnome/mutter/workspaces-only-on-primary false
+# Exercise both multi-monitor workspace modes in the isolated session.
+lo_primary_only="${LO_PRIMARY_ONLY:-false}"
+case "$lo_primary_only" in
+    true|false) ;;
+    *) echo "LO_PRIMARY_ONLY must be true or false" >&2; exit 1 ;;
+esac
+dconf write /org/gnome/mutter/workspaces-only-on-primary "$lo_primary_only"

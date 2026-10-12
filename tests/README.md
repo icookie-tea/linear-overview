@@ -9,6 +9,7 @@ CONTAINER=host KEEP=1 tests/run-tests.sh
 CONTAINER=host ENABLED=0 EXPECT=nonlinear KEEP=1 tests/run-tests.sh
 CONTAINER=host LO_ENGINE=transform KEEP=1 tests/run-tests.sh
 CONTAINER=host LO_MONITORS=1280x800,1600x900 KEEP=1 tests/run-tests.sh
+CONTAINER=host LO_MONITORS=1280x800,1600x900 LO_PRIMARY_ONLY=true KEEP=1 bash tests/run-tests.sh
 ```
 
 The default backend is the `fedora-toolbox-44` toolbox container, using
@@ -20,6 +21,9 @@ GTK4 and permission to create local sockets.
 implementation. `ENABLED=0 EXPECT=nonlinear` verifies that the measurement
 actually detects the stock path. `LO_MONITORS` is a comma-separated list of
 headless virtual-monitor dimensions; integer-scale monitors are tested.
+`LO_PRIMARY_ONLY=true` selects the default GNOME policy where secondary
+monitors have one workspace and no workspace thumbnails. `false` (the harness
+default) selects workspaces on all monitors. Settings remain isolated.
 
 ## Isolation
 
@@ -39,10 +43,16 @@ sockets in the dedicated test runtime.
 The native suite does **not** warm up past the first opening. It checks:
 
 * Single/two-window cold opening and hovered closing.
+* Minimized single/mixed/secondary-monitor windows: per-frame comparison with
+  Shell's original allocator on shadow previews, preserved fading, gesture
+  opening/closing/cancellation and explicit near-zero progress samples.
 * Removing another window and closing before the delayed layout unfreezes.
 * Gesture opening, closing and reverse cancellation, including a hovered
   picker restored after its Workspace actors are rebuilt.
 * A cold opening on a secondary virtual monitor when two monitors are supplied.
+  The suite keeps at least three dynamic workspaces alive so thumbnail
+  `should_show` is true, and checks both window and workspace-container handoff.
+  It also covers hovered exit and secondary-monitor gestures.
 * Actual extension disable/enable in an open picker and geometry/global cleanup.
 
 It fits x, y, width and height against state value t per monotonic segment.
@@ -70,12 +80,20 @@ physical touchpad event delivery.
 * `shown` content geometry, `slot` outer preview geometry, desired geometry
   and the fixed session/picker endpoints.
 * `projectedContainer` and actual `container` geometry.
-* `allocated`, `busy`, steady-state or `disabled` notes.
+* `allocated`, `shell-minimized`, `busy`, steady-state or `disabled` notes.
 * Counts of computed targets and captured closing snapshots.
 
 Native `raw` equals shown geometry: it does not execute a second stock
 allocation just to manufacture a comparison. Use the separate disabled run.
 Legacy records retain the raw-versus-corrected same-frame comparison.
+The minimized regression independently runs the original allocator on shadow
+previews; it compares allocations rather than imposing linearity on Shell's
+minimized behavior. Normal previews in a mixed layout still pass the linear
+path and endpoint checks.
+Workspace `container` geometry uses its actual allocation and parent transform.
+Hover can invalidate actor size during layout, making `get_transformed_size()`
+temporarily report the preferred desktop size. Container handoff checks must
+not compare that preferred size with an allocated picker rectangle.
 
 ## Unit tests and limits
 
