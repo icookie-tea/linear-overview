@@ -57,7 +57,11 @@ extension transfers only that gesture's displayed snapshot by monitor,
 workspace and window identity. Cancelling back to the picker restores hover.
 Snapshots expire at the end of the transition; they are not opening caches.
 
-Steady picker layout, app-grid transitions, inactive workspaces, background
+During workspace navigation, visible switch participants keep their overview
+paths and inherit Shell's workspace translation and inactive scale. Dynamic
+workspace changes defer thumbnail visibility until the transition finishes.
+
+Steady picker layout, app-grid transitions, hidden workspaces, background
 motion and input handling stay with Shell. Existing window-entry, drag and
 allocation transitions also stay with Shell. The extension uses
 `InjectionManager` for the allocation vfunc and three ordinary method hooks;

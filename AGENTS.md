@@ -19,7 +19,7 @@
 ## Native layout contract
 
 `lib/nativeLayout.js` is the default engine. It replaces allocation only during
-visible HIDDEN ⇄ WINDOW_PICKER transitions on active workspaces. All other
+visible HIDDEN ⇄ WINDOW_PICKER transitions on visible workspaces. All other
 branches use the original vfunc. It allocates once instead of correcting an
 allocation with outer preview transforms.
 
@@ -33,8 +33,18 @@ allocation with outer preview transforms.
   sizes, fit-single placement, theme content box and window chrome padding.
 * Interpolate in stage space, then invert the current container transform.
   Allocate the outer rectangle accounting for the centered content hover scale.
+  Keep endpoints centered and unscaled, then compose Shell's workspace scroll
+  and inactive scale. Activity changes must not switch layout engines mid-path.
+  Snapshot navigation is inverted before transfer/replay.
+* Workspace-count changes can alter thumbnail visibility during a transition.
+  Defer that decision once geometry is fixed, then apply the original update
+  after completion, gesture cancellation or disable. Release actor state on
+  destruction; initial thumbnail creation still computes normal visibility.
 * Closing snapshots use displayed `window_container` geometry, including hover.
   Keep the correct desktop endpoint through visible zero.
+  Use its allocation and transform: activating a minimized window invalidates
+  preferred size before `hiding`, so `get_transformed_size()` can report desktop
+  dimensions before the preview has been reallocated.
 * Gesture progress writes the adjustment directly. `gestureBegin` rebuilds
   Workspace views: transfer the current gesture snapshot by monitor/workspace/
   window id, and restore hover when cancelling to the picker.

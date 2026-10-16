@@ -7,12 +7,12 @@ The current target is GNOME Shell 50.5; metadata advertises only version 50.
 ## Ownership
 
 The engine supplies `WorkspaceLayout.vfunc_allocate` during visible
-HIDDEN ⇄ WINDOW_PICKER transitions on active workspaces. It removes the clip,
+HIDDEN ⇄ WINDOW_PICKER transitions on visible workspaces. It removes the clip,
 allocates each preview and updates `_lastBox`. The original vfunc handles
-steady layouts, app-grid transitions and inactive workspaces. On an override
+steady layouts, app-grid transitions and hidden workspaces. On an override
 failure the outer wrapper logs and delegates to the original vfunc.
 
-Three ordinary hooks accompany allocation:
+Five ordinary hooks accompany allocation:
 
 * The primary controls layout's `_computeWorkspacesBoxForState` reserves the
   final thumbnail height and expansion fraction for the picker endpoint.
@@ -20,6 +20,11 @@ Three ordinary hooks accompany allocation:
   secondary displays.
 * `ControlsManager.gestureBegin` captures displayed picker content before the
   original method rebuilds workspace views.
+* `ThumbnailsBox._updateShouldShow` defers workspace-count visibility decisions
+  after geometry is fixed, applying the original update when the transition
+  completes. Fresh geometry still starts with the normal visibility decision.
+* `ControlsManager.gestureEnd` releases deferred decisions after completion,
+  including cancellation to an already shown picker that emits no `shown`.
 
 Secondary thumbnail reservation respects `workspaces-only-on-primary`.
 `should_show` only reflects workspace count, so it can remain true when the
@@ -29,7 +34,7 @@ secondary workspace and windows to jump when the original steady layout took
 over. The regression keeps three dynamic workspaces alive; two workspaces
 hide thumbnails and previously masked the error.
 
-InjectionManager restores all four hooks on disable. Native mode never writes
+InjectionManager restores all six hooks on disable. Native mode never writes
 outer preview pivot, scale or translation. Only the chosen engine is
 constructed; changing `engine` requires disabling/enabling the extension.
 
@@ -56,15 +61,36 @@ sample is needed.
 
 ## Content allocation and closing
 
-The desired screen rectangle is `lerp(sessionFrame, pickerContent, t)`.
+The desired centered-workspace rectangle is `lerp(sessionFrame, pickerContent, t)`.
+Shell's workspace navigation translation and inactive scale are then applied.
 The current container transform is inverted before allocation. The content's
 centered hover scale is accounted for in the outer allocation size and origin,
 so the extension does not fight Shell's scale timeline or leave transforms to
 restore.
 
+Changing the active workspace during overview entry previously handed the
+outgoing workspace back to Shell and started the incoming path with a target
+based on intermediate scroll position. Windows could jump or cancel their
+parent's movement. Visible participants now keep centered endpoints throughout
+the transition. The current workspace's navigation transform is composed after
+interpolation and inverted out of closing snapshots before replay. Hidden
+workspaces continue using the original allocator.
+
+Dynamic workspace removal can also change thumbnail visibility mid-transition.
+The visibility decision is held once geometry is fixed and released on shown,
+hidden, gesture completion or disable. Shell then performs its usual smooth
+thumbnail expansion/collapse. Actor destruction removes pending state.
+
 Keyboard closing captures the currently displayed content on `hiding`, even
 when removing another window froze the layout. The visible zero frame still
 gets the real desktop endpoint. Hidden releases transition snapshots.
+
+Selecting a minimized preview restores the window before `Main.overview.hide()`.
+That restoration invalidates content size: `get_transformed_size()` can then
+return the natural desktop dimensions, although the last allocated picker
+rectangle is still visible. Closing snapshots therefore use the content's
+allocation mapped through its current transform, including hover scale. This
+prevents a size jump at activation without changing focus or unminimize order.
 
 Gesture progress uses the same endpoints, including reversals. Starting a
 picker gesture recreates views. A transient snapshot keyed by monitor,
@@ -117,7 +143,7 @@ Covered cases:
   the secondary monitor and a fresh opening there.
 * Actual disable/enable in a shown overview, geometry preservation, measurement
   teardown and a fresh native opening after re-enable.
-* Twelve native unit regressions plus nine legacy transform regressions.
+* Seventeen native unit regressions plus nine legacy transform regressions.
 
 Opening predictions match Shell's independently rendered steady slots in the
 single/two-window and secondary-display cases. Direct content allocation has
@@ -142,7 +168,7 @@ including 16 near the opening start. Maximum allocation error is 0.01 px;
 opacity quantization differs by at most one level. Normal-window path,
 endpoint, steady-layout handoff and extension lifecycle checks also pass.
 
-All 21 unit regressions pass (12 native, 9 legacy). The three added minimized
+All 26 unit regressions pass (17 native, 9 legacy). The three added minimized
 unit regressions fail against the previous implementation. These numbers are sampled
 test results for the stated configurations, not a universal error bound.
 
@@ -162,6 +188,31 @@ With the fix, both complete dual-monitor suites pass on GNOME Shell 50.5:
 |---|---|---|
 | Primary monitor only | 0.00 px | 0.24 px |
 | All monitors | 0.00 px | 0.63 px |
+
+The activation follow-up on 2026-10-13 invokes the real preview `_activate()`
+entry point, checks restoration and focus, and compares the closing path's
+start with the independently measured preview before selection. It covers
+single-window activation with/without hover, a small minimized window in a
+mixed layout, and hovered activation on a secondary monitor. The old code
+reproduces a 29 px starting-width jump and additional hover discontinuity;
+the allocated-content snapshot unit regression also fails against it.
+Both complete 1280×800 + 1600×900 suites pass with primary-only and all-monitor
+workspaces. Maximum activation-start error is 0.14 px across the four cases;
+restoration, focus, linear path and desktop endpoint checks all pass.
+
+Workspace-switch regressions hold overview progress at 0.35 while switching
+back and forth, checking both windows relative to their moving workspaces.
+Automatic entry is interrupted at progress 0.2 and 0.7, then the resulting
+picker is compared with the real original allocator on shadow previews.
+The test also runs with a window on the secondary monitor and exercises
+dynamic removal of an empty primary workspace. Deferred thumbnail animation
+is allowed to finish before the final picker comparison; `shown` precedes
+the final allocation. Normal screen-space linearity assertions apply when
+workspace navigation is stationary.
+On GNOME Shell 50.5, both full dual-monitor policies pass these cases. Held
+progress keeps relative window geometry unchanged within sampled precision;
+the settled incoming picker differs from the original allocator by 0.10 px.
+The pre-fix held-progress regression reproduces offsets of 878.69/966.93 px.
 
 Physical touchpad event delivery, fractional scaling, hotplug, attached dialogs,
 large multirow sets and custom themes remain outside the verified matrix.

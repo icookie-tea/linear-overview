@@ -30,6 +30,7 @@ function fixture() {
     math.clamp = (x, lower, upper) => Math.min(upper, Math.max(lower, x));
     const controls = {getWorkspacesBoxForState: () => new ActorBox({y1: 100, x2: 1280, y2: 700}),
         layout_manager: {},
+        _thumbnailsBox: {should_show: true},
         apply_relative_transform_to_point: (_, point) => point,
         _workspacesDisplay: {get_theme_node: () => ({get_content_box: box => box.copy()})}};
     overview._overview = {controls};
@@ -37,7 +38,7 @@ function fixture() {
         Main: {overview, layoutManager: {primaryIndex: 0, monitors: [{x: 0, y: 0, width: 1280, height: 800}]}},
         Graphene: {Point3D: class {constructor(p = {}) {Object.assign(this, {x: 0, y: 0, z: 0}, p);}}},
         Clutter: {ActorBox, RequestMode: {WIDTH_FOR_HEIGHT: 1}, TextDirection: {RTL: 1}},
-        ControlsManager: class {}, SecondaryMonitorDisplay: class {}, FitMode: {SINGLE: 0},
+        ControlsManager: class {}, SecondaryMonitorDisplay: class {}, ThumbnailsBox: class {}, FitMode: {SINGLE: 0},
         global: {workspace_manager: {layout_rows: 1}},
         Measure: {isEnabled: () => true, push: frame => frames.push(frame)},
     });
@@ -48,12 +49,14 @@ function fixture() {
     }
     const config = {values: {enabled: true, engine: 'native'}};
     const engine = new context.NativeLayout(config, (message, error) => {throw error ?? new Error(message);});
-    const workspace = {request_mode: 1,
+    const workspace = {request_mode: 1, visible: true, scale_x: 1, scale_y: 1,
         get_preferred_width: height => [0, height * 5 / 3], get_preferred_height: width => [0, width * 3 / 5],
         get_theme_node: () => ({get_content_box: box => box.copy()})};
-    const view = {_workspaces: [workspace], text_direction: 0,
-        _getSpacing: () => 24, _getFirstFitSingleWorkspaceBox: box => {
-            const result = new ActorBox({x1: (box.get_width() - box.get_height() * 5 / 3) / 2});
+    const view = {_workspaces: [workspace], text_direction: 0, _scrollAdjustment: {value: 0, upper: 1},
+        allocation: new ActorBox({x2: 1280, y2: 600}), apply_relative_transform_to_point: (_, point) => ({x: point.x, y: 100 + point.y}),
+        _getSpacing: () => 24, _getFirstFitSingleWorkspaceBox(box, spacing) {
+            const width = box.get_height() * 5 / 3;
+            const result = new ActorBox({x1: (box.get_width() - width) / 2 - this._scrollAdjustment.value * (width + spacing)});
             result.set_size(box.get_height() * 5 / 3, box.get_height());
             return result;
         }};
@@ -82,6 +85,13 @@ function fixture() {
         actor.get_transformed_position = () => { const b = geometry(content); return [b.x, b.y]; };
         actor.get_transformed_size = () => { const b = geometry(content); return [b.width, b.height]; };
     }
+    Object.defineProperty(preview.window_container, 'allocation', {get: () =>
+        new ActorBox({x2: preview.allocation.get_width(), y2: preview.allocation.get_height()})});
+    preview.window_container.apply_relative_transform_to_point = (_, point) => {
+        const b = geometry();
+        return {x: b.x + point.x * preview.window_container.scale_x * container.scale.x,
+            y: b.y + point.y * preview.window_container.scale_y * container.scale.y};
+    };
     const info = {metaWindow: {get_id: () => 1, showing_on_its_workspace: () => true}, currentTransition: null};
     const areas = [];
     const layout = {_metaWorkspace: {active: true}, _monitorIndex: 0, _needsLayout: true,
@@ -94,6 +104,7 @@ function fixture() {
         {x: box.x1, y: box.y1, width: box.get_width(), height: box.get_height()});
     layout.notify = () => {};
     layout._overviewAdjustment = {value: 0, getStateTransitionParams: () => layout.params};
+    controls._stateAdjustment = layout._overviewAdjustment;
     function at(t, closing = false) {
         layout._stateAdjustment.value = t;
         layout._overviewAdjustment.value = t;
@@ -101,7 +112,7 @@ function fixture() {
         overview.closing = closing;
         assert.equal(engine.allocate(layout, container, container.allocation), true);
     }
-    return {overview, config, engine, frames, preview, layout, container, areas, at, geometry};
+    return {overview, controls, config, engine, frames, preview, layout, container, workspace, view, areas, at, geometry};
 }
 function equalBox(actual, expected) {
     for (const key of ['x', 'y', 'width', 'height'])
@@ -124,6 +135,109 @@ test('cold opening calculates the final picker once and allocates content direct
     }
     assert.equal(f.areas.length, 1);
     assert.deepEqual(f.areas[0], {x: 0, y: 0, width: 1000, height: 600});
+});
+
+test('outgoing workspace keeps its path and composes navigation when active changes mid-opening', () => {
+    const f = fixture();
+    const t = 0.35;
+    const canonical = interpolate(f.preview.boundingBox, {x: 390, y: 250, width: 500, height: 300}, t);
+    f.container.allocation.set_size(1000, 600);
+    for (const scroll of [0, 0.25, 0.5, 0.75, 1, 0.5, 0]) {
+        const scale = 1 - 0.05 * scroll;
+        f.layout._metaWorkspace.active = scroll === 0;
+        f.view._scrollAdjustment.value = scroll;
+        f.workspace.scale_x = f.workspace.scale_y = scale;
+        f.container.scale = {x: scale, y: scale};
+        f.container.origin = {x: 140 - scroll * 1024 + 1000 * (1 - scale) / 2, y: 100 + 600 * (1 - scale) / 2};
+        f.at(t);
+        equalBox(f.geometry(), {x: f.container.origin.x + (canonical.x - 140) * scale,
+            y: f.container.origin.y + (canonical.y - 100) * scale, width: canonical.width * scale, height: canonical.height * scale});
+    }
+    assert.equal(f.areas.length, 1, 'navigation never replaces the overview endpoints');
+});
+
+test('workspace-count thumbnail decisions wait for transition completion and release actor state', () => {
+    for (const release of ['shown', 'hidden', 'gesture', 'disable']) {
+        const f = fixture();
+        const hooks = new Map();
+        f.engine.install({overrideMethod(_, name, create) {
+            const original = name === '_updateShouldShow' ? function () { this._shouldShow = this.wanted; this.notify('should-show'); }
+                : name === 'gestureEnd' ? function (_target, _duration, complete) { complete(); } : () => {};
+            hooks.set(name, create(original));
+        }});
+        const actor = Object.assign(new Signals(), {_shouldShow: false, wanted: true, notifications: 0,
+            notify() { this.notifications++; }});
+        const update = hooks.get('_updateShouldShow');
+        update.call(actor);
+        assert.equal(actor._shouldShow, true, 'initial visibility is calculated before any geometry is fixed');
+        f.controls._thumbnailsBox.should_show = false;
+        f.at(0.35);
+        update.call(actor);
+        assert.equal(actor._shouldShow, false, 'a recreated thumbnail box adopts the fixed transition decision');
+        assert.equal(f.engine._pendingThumbnails.size, 1);
+        if (release === 'disable') {
+            f.engine.destroy();
+        } else if (release === 'gesture') {
+            let completed = false;
+            hooks.get('gestureEnd')(1, 180, () => { completed = true; });
+            assert(completed, 'Shell completion callback still runs');
+        } else {
+            f.overview.emit(release);
+        }
+        assert.equal(actor._shouldShow, true, 'the original visibility decision is applied after completion');
+        assert.equal(f.engine._pendingThumbnails.size, 0);
+        assert.equal(f.engine._geometryStarted, false);
+        if (release !== 'disable')
+            f.engine.destroy();
+        assert.equal(actor.handlers.size, 0);
+        assert.equal(f.engine._thumbnailActors.size, 0);
+    }
+});
+
+test('incoming visible workspace starts with centered targets before it becomes active', () => {
+    const f = fixture();
+    f.view._workspaces.unshift({...f.workspace});
+    f.view._scrollAdjustment.upper = 2;
+    f.container.allocation.set_size(1000, 600);
+    const canonical = interpolate(f.preview.boundingBox, {x: 390, y: 250, width: 500, height: 300}, 0.35);
+    for (const scroll of [0, 0.25, 0.5, 0.75, 1]) {
+        const scale = 0.95 + 0.05 * scroll;
+        f.layout._metaWorkspace.active = scroll === 1;
+        f.view._scrollAdjustment.value = scroll;
+        f.workspace.scale_x = f.workspace.scale_y = scale;
+        f.container.scale = {x: scale, y: scale};
+        f.container.origin = {x: 140 + (1 - scroll) * 1024 + 1000 * (1 - scale) / 2, y: 100 + 600 * (1 - scale) / 2};
+        f.at(0.35);
+        equalBox(f.geometry(), {x: f.container.origin.x + (canonical.x - 140) * scale,
+            y: f.container.origin.y + (canonical.y - 100) * scale, width: canonical.width * scale, height: canonical.height * scale});
+    }
+    assert.equal(f.areas.length, 1);
+});
+
+test('closing snapshot removes navigation before replaying it on an inactive visible workspace', () => {
+    const f = fixture();
+    f.container.allocation.set_size(1000, 600);
+    f.layout._metaWorkspace.active = false;
+    f.view._scrollAdjustment.value = 0.5;
+    f.workspace.scale_x = f.workspace.scale_y = 0.975;
+    f.container.scale = {x: 0.975, y: 0.975};
+    f.container.origin = {x: 140 - 512 + 12.5, y: 107.5};
+    f.at(1);
+    f.preview.window_container.scale_x = f.preview.window_container.scale_y = 1.03;
+    const before = f.geometry();
+    const picker = {x: 140 + (before.x - f.container.origin.x) / 0.975, y: 100 + (before.y - 107.5) / 0.975,
+        width: before.width / 0.975, height: before.height / 0.975};
+    f.overview.animationInProgress = false;
+    f.layout.params = {transitioning: false, currentState: 1, initialState: 1, finalState: 1};
+    f.engine.observe(f.layout, f.container);
+    f.overview.emit('hiding');
+    f.overview.animationInProgress = true;
+    for (const t of [1, 0.7, 0.3, 0]) {
+        const canonical = interpolate(f.preview.boundingBox, picker, t);
+        f.at(t, true);
+        equalBox(f.geometry(), {x: f.container.origin.x + (canonical.x - 140) * 0.975,
+            y: f.container.origin.y + (canonical.y - 100) * 0.975, width: canonical.width * 0.975, height: canonical.height * 0.975});
+    }
 });
 
 test('secondary picker respects primary-only policy even when thumbnails should_show is true', () => {
@@ -168,6 +282,34 @@ test('workspace measurement uses allocation even when hover invalidates the pref
     f.container.get_transformed_size = () => [1280, 768];
     f.at(0.5);
     equalBox(f.frames.at(-1).container, {x: 50, y: 30, width: 900, height: 480});
+});
+
+test('activating a minimized preview closes from its allocated content after preferred-size invalidation', () => {
+    for (const hover of [1, 1.04]) {
+        const f = fixture();
+        f.layout._stateAdjustment.value = 1;
+        f.layout._overviewAdjustment.value = 1;
+        f.overview.animationInProgress = false;
+        f.layout.params = {transitioning: false, currentState: 1, initialState: 1, finalState: 1};
+        f.preview.allocate(new ActorBox({x1: 390, y1: 250, x2: 890, y2: 550}));
+        f.preview.window_container.scale_x = hover;
+        f.preview.window_container.scale_y = hover;
+        f.engine.observe(f.layout, f.container);
+        const picker = f.geometry();
+        // Mutter restores the selected window before Main.overview.hide().
+        // The allocation still shows the picker, but a size query now returns
+        // the larger natural desktop dimensions until Clutter allocates again.
+        f.preview.window_container.get_transformed_size = () => [589 * hover, 336 * hover];
+        f.overview.emit('hiding');
+        f.overview.animationInProgress = true;
+        for (const t of [1, 0.9, 0.5, 0.1, 0]) {
+            f.preview.window_container.scale_x = 1 + (hover - 1) * t;
+            f.preview.window_container.scale_y = 1 + (hover - 1) * t;
+            f.at(t, true);
+            equalBox(f.geometry(), interpolate(f.preview.boundingBox, picker, t));
+        }
+        assert.equal(f.areas.length, 0, 'activation uses the displayed snapshot, not a recomputed picker');
+    }
 });
 
 test('minimized previews start at the workarea origin with slot size, not at their saved frame', () => {
@@ -294,10 +436,10 @@ test('picker gesture snapshot survives view recreation and restores hover on can
     equalBox(replacement.geometry(), picker);
 });
 
-test('inactive workspace, app grid and disabled engine retain shell allocation', () => {
-    for (const reason of ['inactive', 'app-grid', 'disabled', 'hidden']) {
+test('hidden workspace, app grid and disabled engine retain shell allocation', () => {
+    for (const reason of ['hidden-workspace', 'app-grid', 'disabled', 'hidden']) {
         const f = fixture();
-        if (reason === 'inactive') f.layout._metaWorkspace.active = false;
+        if (reason === 'hidden-workspace') f.workspace.visible = false;
         if (reason === 'app-grid') f.layout.params.finalState = 2;
         if (reason === 'disabled') f.config.values.enabled = false;
         if (reason === 'hidden') f.overview.visible = false;

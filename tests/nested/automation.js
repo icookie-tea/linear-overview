@@ -14,6 +14,7 @@
 //       really observes the shell's quadratic path
 //   lo_expect=linear    (correction enabled)  - E2 must PASS
 import GLib from 'gi://GLib';
+import Graphene from 'gi://Graphene';
 import Meta from 'gi://Meta';
 import * as Main from 'resource:///org/gnome/shell/ui/main.js';
 import {ExtensionState} from 'resource:///org/gnome/shell/misc/extensionUtils.js';
@@ -247,6 +248,10 @@ function analyse(caseName, window, requirePicker = true) {
         const residual = runResidual(run, 'shown');
         const rawResidual = runResidual(run, 'raw');
         const aspect = aspectDrift(run);
+        // A one-pixel allocation rounding step exceeds 0.5% on small
+        // previews. Bound that quantization separately from genuine stretch.
+        const aspectLimit = ENGINE === 'native' ? Math.max(MAX_ASPECT_DRIFT,
+            1 / Math.min(...run.map(frame => frame.shown.width)) + 1 / Math.min(...run.map(frame => frame.shown.height))) : MAX_ASPECT_DRIFT;
         worst = Math.max(worst, residual);
         const direction = run[0].direction ?? (run[run.length - 1].t > run[0].t ? 'open' : 'close');
         const detail = `${direction} run ${index} frames=${run.length} span=${span.toFixed(2)} ` +
@@ -262,7 +267,7 @@ function analyse(caseName, window, requirePicker = true) {
             check(`${caseName}: ${direction} run ${index} moves linearly in t`,
                 residual <= MAX_RESIDUAL_PX, detail);
             check(`${caseName}: ${direction} run ${index} keeps its aspect ratio`,
-                aspect <= MAX_ASPECT_DRIFT, detail);
+                aspect <= aspectLimit, `${detail}; tolerance=${(aspectLimit * 100).toFixed(2)}%`);
             const endpoints = {session: 0, picker: 1};
             for (const [key, t] of Object.entries(endpoints)) {
                 const target = run.find(frame => frame[key])?.[key];
@@ -560,6 +565,140 @@ async function minimizedCase(caseName, window, normalWindow = null) {
     }
 }
 
+async function activateMinimizedCase(caseName, window, hover = false) {
+    Main.overview.hide();
+    await waitOverviewAt(0);
+    window.minimize();
+    await waitFor(() => window.minimized && !window.showing_on_its_workspace());
+    await sleep(SETTLE_MS);
+    Main.overview.show();
+    await waitOverviewAt(1);
+    await sleep(SETTLE_MS);
+    if (hover) {
+        window._delegate.showOverlay(false);
+        await sleep(SETTLE_MS);
+    }
+    const before = contentBox(window);
+    global.__linearOverviewFrames.length = 0;
+    // This is the click/key activation entry point, not a direct unminimize
+    // followed by hide: keep Shell/Mutter's real ordering of those operations.
+    window._delegate._activate();
+    info(`${caseName}: minimized immediately after selection=${window.minimized}`);
+    await waitOverviewAt(0);
+    await waitFor(() => !window.minimized && global.display.focus_window === window);
+    const frames = framesFor(window).filter(frame => frame.phase === 'transition');
+    const run = splitRuns(frames).find(segment => segment.length >= MIN_FRAMES &&
+        Math.max(...segment.map(frame => frame.t)) - Math.min(...segment.map(frame => frame.t)) >= MIN_SPAN);
+    const error = run ? Math.max(...['x', 'y', 'width', 'height'].map(component =>
+        Math.abs(fitResidual(run, 'shown', component, 1) - before[component]))) : Infinity;
+    check(`${caseName}: exit starts at the displayed minimized preview`, error <= MAX_RESIDUAL_PX,
+        `start error=${error.toFixed(2)}px; before=${JSON.stringify(before)}; captured=${JSON.stringify(run?.[0]?.picker)}`);
+    check(`${caseName}: desktop restores and focuses the selected window`, !window.minimized && global.display.focus_window === window);
+    analyse(caseName, window, false);
+    await sleep(SETTLE_MS);
+}
+
+function workspaceRelativeBox(window) {
+    const content = window._delegate.window_container;
+    const container = window._delegate.get_parent();
+    const origin = content.apply_relative_transform_to_point(container, new Graphene.Point3D());
+    const allocation = content.allocation;
+    const corner = content.apply_relative_transform_to_point(container,
+        new Graphene.Point3D({x: allocation.get_width(), y: allocation.get_height()}));
+    return {x: origin.x, y: origin.y, width: corner.x - origin.x, height: corner.y - origin.y};
+}
+
+function stockPickerBox(window) {
+    const preview = window._delegate;
+    const container = preview.get_parent();
+    const layout = container.layout_manager;
+    const children = new Map([...layout._windows].map(([child]) => [child, {
+        visible: child.visible, boundingBox: child.boundingBox,
+        allocate(box) { this.allocation = box.copy(); },
+    }]));
+    const reference = Object.create(layout);
+    reference._windows = new Map([...layout._windows].map(([child, info]) => [children.get(child), {...info, currentTransition: null}]));
+    reference._needsLayout = false;
+    reference._lastBox = null;
+    reference._getWindowSlots = box => layout._getWindowSlots.call(reference, box)
+        .map(slot => [...slot.slice(0, 4), children.get(slot[4])]);
+    reference.notify = () => {};
+    WorkspaceLayout.prototype.vfunc_allocate.call(reference, container, container.allocation.copy());
+    const box = children.get(preview).allocation;
+    return {x: box.x1, y: box.y1, width: box.get_width(), height: box.get_height()};
+}
+
+async function workspaceSwitchDuringOpening(windowA, windowB, name = 'opening workspace switch') {
+    Main.overview.hide();
+    await waitOverviewAt(0);
+    let workspaceA = global.workspace_manager.get_active_workspace();
+    const ensureWorkspaceA = () => {
+        const manager = global.workspace_manager;
+        const exists = Array.from({length: manager.n_workspaces}, (_, index) => manager.get_workspace_by_index(index)).includes(workspaceA);
+        if (!exists) {
+            workspaceA = manager.append_new_workspace(false, global.get_current_time());
+            windowA.change_workspace(workspaceA);
+        }
+        return workspaceA;
+    };
+    const workspaceB = global.workspace_manager.append_new_workspace(false, global.get_current_time());
+    windowB.change_workspace(workspaceB);
+    await sleep(1000);
+    const tracker = {confirmSwipe() {}};
+    Main.overview._gestureBegin(tracker);
+    Main.overview._gestureUpdate(tracker, 0.35);
+    await sleep(150);
+    const before = [windowA, windowB].map(workspaceRelativeBox);
+    const errors = [0, 0];
+    // Hold overview progress fixed while the real workspace switch runs.
+    // Windows must keep their position/size relative to the moving workspace.
+    for (let direction = 0; direction < 2; direction++) {
+        const target = direction === 0 ? workspaceB : ensureWorkspaceA();
+        target.activate(global.get_current_time());
+        for (let i = 0; i < 14; i++) {
+            await sleep(25);
+            [windowA, windowB].forEach((window, index) => {
+                const actual = workspaceRelativeBox(window);
+                for (const key of ['x', 'y', 'width', 'height'])
+                    errors[index] = Math.max(errors[index], Math.abs(actual[key] - before[index][key]));
+            });
+        }
+    }
+    errors.forEach((error, index) => check(`${name}: window ${index} follows its workspace without a jump`,
+        error <= MAX_RESIDUAL_PX, `relative geometry error=${error.toFixed(2)}px`));
+    Main.overview._gestureEnd(tracker, 180, 1);
+    await waitOverviewAt(1);
+    await sleep(SETTLE_MS);
+    Main.overview.hide();
+    await waitOverviewAt(0);
+    try {
+        for (const progress of [0.2, 0.7]) {
+            ensureWorkspaceA().activate(global.get_current_time());
+            await sleep(SETTLE_MS);
+            Main.overview.show();
+            await waitFor(() => stateValue() >= progress, 20000, 5);
+            check(`${name} at ${progress}: interrupts the automatic transition`, stateValue() < 1);
+            workspaceB.activate(global.get_current_time());
+            await waitOverviewAt(1);
+            await sleep(SETTLE_MS);
+            // 'shown' precedes the final allocation. Also let a deferred
+            // thumbnail animation settle before comparing the final picker.
+            const actual = workspaceRelativeBox(windowB);
+            const expected = stockPickerBox(windowB);
+            const handoffError = Math.max(...['x', 'y', 'width', 'height'].map(key => Math.abs(actual[key] - expected[key])));
+            check(`${name} at ${progress}: incoming windows join the steady layout`,
+                handoffError <= MAX_RESIDUAL_PX, `original allocator error=${handoffError.toFixed(2)}px`);
+            Main.overview.hide();
+            await waitOverviewAt(0);
+        }
+    } finally {
+        ensureWorkspaceA().activate(global.get_current_time());
+        await sleep(SETTLE_MS);
+    }
+    windowB.change_workspace(workspaceA);
+    await sleep(1000);
+}
+
 export async function run() {
     print(`${TAG} START expect=${EXPECT}`);
 
@@ -591,6 +730,10 @@ export async function run() {
         await measure('single window hovered', windowA, true);
         if (ENGINE === 'native' && EXPECT === 'linear')
             await minimizedCase('single minimized window', windowA);
+        if (ENGINE === 'native' && EXPECT === 'linear') {
+            await activateMinimizedCase('single minimized activation', windowA);
+            await activateMinimizedCase('single minimized hovered activation', windowA, true);
+        }
 
         // Case 2: two windows of different sizes in the same picker layout.
         windowA.change_workspace(workspaceA);
@@ -600,7 +743,11 @@ export async function run() {
         await sleep(1000);
         await measure('two windows', windowA);
         if (ENGINE === 'native' && EXPECT === 'linear')
+            await workspaceSwitchDuringOpening(windowA, windowB);
+        if (ENGINE === 'native' && EXPECT === 'linear')
             await minimizedCase('mixed minimized and normal windows', windowB, windowA);
+        if (ENGINE === 'native' && EXPECT === 'linear')
+            await activateMinimizedCase('mixed minimized hovered activation', windowB, true);
 
         if (ENGINE === 'native' && EXPECT === 'linear' && Main.layoutManager.monitors.length > 1) {
             const secondary = Main.layoutManager.monitors.find(m => m.index !== Main.layoutManager.primaryIndex);
@@ -619,8 +766,10 @@ export async function run() {
             await gestureCase(windowA, 'secondary monitor gesture close cancelled hovered', 1, 1,
                 [0.92, 0.82, 0.72, 0.62, 0.52, 0.42, 0.32, 0.22, 0.32, 0.42, 0.52, 0.62, 0.72, 0.82, 0.92], true);
             await minimizedCase('secondary monitor minimized window', windowA);
+            await activateMinimizedCase('secondary monitor minimized hovered activation', windowA, true);
+            await workspaceSwitchDuringOpening(windowA, windowB, 'secondary opening workspace switch');
             windowA.move_to_monitor(Main.layoutManager.primaryIndex);
-            windowB.change_workspace(workspaceA);
+            windowB.change_workspace(global.workspace_manager.get_active_workspace());
             await placeWindow(windowA, {x: 0.18, y: 0.18, width: 0.46, height: 0.42});
             await sleep(1000);
         }

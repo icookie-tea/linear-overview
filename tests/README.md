@@ -46,9 +46,17 @@ The native suite does **not** warm up past the first opening. It checks:
 * Minimized single/mixed/secondary-monitor windows: per-frame comparison with
   Shell's original allocator on shadow previews, preserved fading, gesture
   opening/closing/cancellation and explicit near-zero progress samples.
+* Activating a minimized preview through `_activate()`: closing begins at its
+  displayed geometry, finishes at the desktop frame, restores and focuses the
+  selected window. Includes single/mixed/secondary-monitor and hover cases.
 * Removing another window and closing before the delayed layout unfreezes.
 * Gesture opening, closing and reverse cancellation, including a hovered
   picker restored after its Workspace actors are rebuilt.
+* Workspace switching during entry: held overview progress, outgoing/incoming
+  windows following their workspaces, automatic entry interrupted at 0.2/0.7,
+  primary/secondary monitors and dynamic empty-workspace removal. Final picker
+  geometry is checked against the original allocator after deferred thumbnails
+  finish animating.
 * A cold opening on a secondary virtual monitor when two monitors are supplied.
   The suite keeps at least three dynamic workspaces alive so thumbnail
   `should_show` is true, and checks both window and workspace-container handoff.
@@ -66,6 +74,9 @@ preferred-size or pixel-rounding mismatches.
 Native window content is allocated through Clutter and can be rounded by a
 pixel. Its residual is therefore not the 0.01 px measured by the old transform
 engine. The old engine retains warm-up because it depends on sampled endpoints.
+Native aspect checks allow one-pixel quantization relative to preview size;
+small previews can exceed 0.5% aspect drift from rounding alone. The 1.5 px
+path and endpoint thresholds still apply.
 
 Gesture tests call the real `Overview._gestureBegin/Update/End` entry points
 with controlled progress values. They verify the Shell state/lifecycle, not
